@@ -4,6 +4,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DiMe · Control Comercial</title>
 <style>
+header>div:last-child{display:none} body.authenticated header>div:last-child{display:block} #authPanel{display:block} body.authenticated #authPanel{display:none}
+
 :root{--t:#51d7c9;--s:#ff8981;--d:#203033;--m:#6d7b7d;--bg:#f5f8f8;--w:#fff;--l:#dfe8e8}
 *{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:var(--bg);color:var(--d)}
 header{background:var(--d);color:#fff;padding:18px 24px;display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}h1{margin:0;font-size:22px}
@@ -18,12 +20,27 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
 .notice{padding:12px;border-radius:9px;background:#fff7df;border:1px solid #f0d88a;margin:12px 0}.ok{background:#e9faf7;border-color:#bcebe4}
 @media(max-width:850px){.grid{grid-template-columns:1fr 1fr}.formgrid{grid-template-columns:1fr}}@media(max-width:550px){.grid{grid-template-columns:1fr}.container{padding:12px}table{display:block;overflow:auto;white-space:nowrap}}
 .visit-status{padding:6px 8px;border:1px solid #d7dde2;border-radius:8px;background:#fff;font:inherit;cursor:pointer}.visit-status:focus{outline:2px solid #51d7c9;outline-offset:1px}.status-select{padding:6px 8px;border:1px solid #d7dde2;border-radius:8px;background:#fff;font:inherit;cursor:pointer}.status-select:focus{outline:2px solid #51d7c9;outline-offset:1px}</style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="./supabase-config.js"></script>
 </head>
 <body>
 <header><div><h1>DiMe · Control Comercial</h1><small style="color:#ccd">Clientes · prospectos · visitas · seguimientos</small></div><div>
-<button id="btnExport" class="primary">Exportar</button> <button id="btnBackup" class="secondary">Respaldar</button> <button id="btnRestore" class="secondary">Restaurar</button>
+<button id="btnExport" class="primary">Exportar</button> <button id="btnBackup" class="secondary">Respaldar</button> <button id="btnRestore" class="secondary">Restaurar</button> <button id="btnLogout" class="secondary">Cerrar sesión</button>
 </div></header>
-<main class="container">
+
+<section id="authPanel" class="container" style="max-width:460px">
+  <div class="panel">
+    <h2>Iniciar sesión</h2>
+    <p>Ingresa con tu usuario autorizado de Dime Control Comercial.</p>
+    <form id="loginForm" class="formgrid" style="grid-template-columns:1fr">
+      <div class="field"><label>Correo electrónico</label><input id="loginEmail" type="email" autocomplete="username" required></div>
+      <div class="field"><label>Contraseña</label><input id="loginPassword" type="password" autocomplete="current-password" required></div>
+      <button class="primary" type="submit">Ingresar</button>
+    </form>
+    <div id="authMessage" class="notice hidden"></div>
+  </div>
+</section>
+<main class="container hidden" id="appMain">
 <nav id="nav"><button class="active" data-tab="dashboard">Dashboard</button><button data-tab="agenda">Agenda</button><button data-tab="clientes">Clientes</button><button data-tab="historial">Historial</button><button data-tab="visitas">Visita clientes</button><button data-tab="registrar">Registrar actividad</button></nav>
 <section id="dashboard"><div class="grid"><div class="card kpi"><span>Acciones pendientes</span><strong id="pending">0</strong></div><div class="card kpi"><span>Vencidas</span><strong id="overdue">0</strong></div><div class="card kpi"><span>Prospectos nuevos</span><strong id="prospects">0</strong></div><div class="card kpi"><span>Seguimientos</span><strong id="followups">0</strong></div></div><div class="panel"><h2>Control comercial</h2><p>Registra cada visita/contacto y define siempre una próxima acción y fecha. Así la agenda se alimenta automáticamente.</p><div id="storageNotice"></div><div id="summary"></div></div></section>
 <section id="agenda" class="hidden"><div class="panel"><h2>Agenda</h2><div class="toolbar"><input id="agendaDate" type="date"><select id="agendaFilter"><option value="all">Todas</option><option value="pending">Pendientes</option><option value="done">Realizadas</option><option value="overdue">Vencidas</option><option value="new">Prospectos</option><option value="old">Clientes existentes</option><option value="follow">Seguimientos</option></select><button id="btnToday" class="secondary">Hoy</button></div><div id="agendaTable"></div></div></section>
@@ -43,7 +60,106 @@ function load(key,fallback){try{const raw=localStorage.getItem(key);return raw?J
 let clients=load(KEY_CLIENTS,null);let acts=load(KEY_ACTS,[]);let visits=load(KEY_VISITS,[]);
 if(!Array.isArray(clients)||!clients.length)clients=SEED.map(x=>({id:uid(),name:x[0],zone:x[1],type:'old',status:'Por clasificar',contact:''}));
 if(!Array.isArray(acts))acts=[];
-function save(){try{localStorage.setItem(KEY_CLIENTS,JSON.stringify(clients));localStorage.setItem(KEY_ACTS,JSON.stringify(acts));localStorage.setItem(KEY_VISITS,JSON.stringify(visits));return true}catch(e){return false}}
+let cloudReady=false, cloudUser=null, cloudRole=null, cloudBaseline={clients:[],activities:[],visits:[]}, cloudQueue=Promise.resolve();
+function save(){
+  try{
+    localStorage.setItem(KEY_CLIENTS,JSON.stringify(clients));
+    localStorage.setItem(KEY_ACTS,JSON.stringify(acts));
+    localStorage.setItem(KEY_VISITS,JSON.stringify(visits));
+    if(cloudReady) queueCloudSync();
+    return true;
+  }catch(e){return false}
+}
+function showAuthMessage(message,isError=true){
+  const el=document.getElementById('authMessage');el.textContent=message;el.classList.remove('hidden');el.style.background=isError?'#fff0ee':'#e9faf7';
+}
+function dbClient(c){return {id:c.id,name:c.name,zone:c.zone||'Por clasificar',type:c.type||'new',status:c.status||'Prospecto',contact:c.contact||'',is_archived:false};}
+function dbActivity(a){return {id:a.id,client_id:a.clientId,type:a.type||'old',activity_date:a.date,result:a.result||'',next_action:a.next||'Ninguna',next_date:a.nextDate||null,notes:a.notes||'',completed:!!a.completed,completed_at:a.completedAt||null,is_archived:false};}
+function dbVisit(v){return {id:v.id,name:v.name,contact:v.contact||'',location:v.location||'',visit_date:v.visitDate,catalog:v.catalog||'no',next_visit:v.nextVisit||null,status:v.status||'pending',notes:v.notes||'',is_archived:false};}
+function fromDbClient(x){return {id:x.id,name:x.name,zone:x.zone,type:x.type,status:x.status,contact:x.contact};}
+function fromDbActivity(x){return {id:x.id,clientId:x.client_id,type:x.type,date:x.activity_date,result:x.result,next:x.next_action,nextDate:x.next_date||'',notes:x.notes||'',completed:!!x.completed,completedAt:x.completed_at||undefined};}
+function fromDbVisit(x){return {id:x.id,name:x.name,contact:x.contact||'',location:x.location||'',visitDate:x.visit_date,catalog:x.catalog||'no',nextVisit:x.next_visit||'',status:x.status||'pending',notes:x.notes||''};}
+async function loadCloudData(){
+  const [cr,ar,vr]=await Promise.all([
+    window.dimeSupabase.from('clients').select('*').eq('is_archived',false),
+    window.dimeSupabase.from('activities').select('*').eq('is_archived',false),
+    window.dimeSupabase.from('visit_points').select('*').eq('is_archived',false)
+  ]);
+  for(const r of [cr,ar,vr])if(r.error)throw r.error;
+  clients=(cr.data||[]).map(fromDbClient);
+  acts=(ar.data||[]).map(fromDbActivity);
+  visits=(vr.data||[]).map(fromDbVisit);
+  cloudBaseline={clients:clients.map(x=>x.id),activities:acts.map(x=>x.id),visits:visits.map(x=>x.id)};
+  localStorage.setItem(KEY_CLIENTS,JSON.stringify(clients));localStorage.setItem(KEY_ACTS,JSON.stringify(acts));localStorage.setItem(KEY_VISITS,JSON.stringify(visits));
+  cloudReady=true;renderAll();
+}
+async function queueCloudSync(){
+  cloudQueue=cloudQueue.then(async()=>{
+    if(!cloudReady)return;
+    const payloads=[
+      ['clients',clients.map(dbClient),cloudBaseline.clients],
+      ['activities',acts.map(dbActivity),cloudBaseline.activities],
+      ['visit_points',visits.map(dbVisit),cloudBaseline.visits]
+    ];
+    for(const [table,rows,previousIds] of payloads){
+      const currentIds=rows.map(x=>x.id), removed=previousIds.filter(id=>!currentIds.includes(id));
+      if(removed.length){
+        const del=await window.dimeSupabase.from(table).delete().in('id',removed);
+        if(del.error)throw del.error;
+      }
+      if(rows.length){
+        const up=await window.dimeSupabase.from(table).upsert(rows,{onConflict:'id'});
+        if(up.error)throw up.error;
+      }
+    }
+    cloudBaseline={clients:clients.map(x=>x.id),activities:acts.map(x=>x.id),visits:visits.map(x=>x.id)};
+    const notice=document.getElementById('storageNotice');
+    if(notice)notice.innerHTML='<div class="notice ok">✓ Cambios sincronizados con Supabase.</div>';
+  }).catch(err=>{
+    const notice=document.getElementById('storageNotice');
+    if(notice)notice.innerHTML='<div class="notice">⚠ No se pudo sincronizar: '+escapeHtml(err.message||String(err))+'</div>';
+  });
+  return cloudQueue;
+}
+async function enterApp(session){
+  cloudUser=session.user;
+  const profile=await window.dimeSupabase.from('profiles').select('email,full_name,role').eq('id',cloudUser.id).maybeSingle();
+  if(profile.error)throw profile.error;
+  if(!profile.data)throw new Error('Tu usuario inició sesión, pero no tiene un perfil en public.profiles. Pide al administrador que lo cree.');
+  cloudRole=profile.data.role;
+  document.body.classList.add('authenticated');
+  const canDelete=['admin','coordinator'].includes(cloudRole);
+  document.getElementById('btnAddClient').disabled=false;
+  document.getElementById('btnAddVisitPoint').disabled=false;
+  document.getElementById('appMain').classList.remove('hidden');
+  document.getElementById('btnLogout').style.display='inline-block';
+  await loadCloudData();
+  const label=profile.data.full_name||profile.data.email||cloudUser.email;
+  document.getElementById('storageNotice').innerHTML='<div class="notice ok">Sesión: '+escapeHtml(label)+' · Rol: '+escapeHtml(cloudRole)+' · Datos conectados a Supabase.</div>';
+}
+async function startAuth(){
+  if(!window.supabase||!window.supabase.createClient)throw new Error('No se pudo cargar la librería de Supabase. Verifica tu conexión a internet.');
+  if(!window.DIME_SUPABASE_URL||!window.DIME_SUPABASE_ANON_KEY||window.DIME_SUPABASE_ANON_KEY.includes('PEGA_AQUI'))throw new Error('Falta configurar la URL y la clave anon/public en supabase-config.js.');
+  window.dimeSupabase=window.supabase.createClient(window.DIME_SUPABASE_URL,window.DIME_SUPABASE_ANON_KEY);
+  const {data,error}=await window.dimeSupabase.auth.getSession();if(error)throw error;
+  if(data.session)await enterApp(data.session);
+  window.dimeSupabase.auth.onAuthStateChange(async(event,session)=>{
+    if(event==='SIGNED_IN'&&session){try{await enterApp(session)}catch(e){showAuthMessage(e.message)}}
+    if(event==='SIGNED_OUT'){cloudReady=false;cloudUser=null;document.body.classList.remove('authenticated');document.getElementById('appMain').classList.add('hidden');document.getElementById('authPanel').classList.remove('hidden');}
+  });
+}
+document.getElementById('loginForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  try{
+    const email=document.getElementById('loginEmail').value.trim(),password=document.getElementById('loginPassword').value;
+    if(!window.dimeSupabase)await startAuth();
+    const {error}=await window.dimeSupabase.auth.signInWithPassword({email,password});
+    if(error)throw error;
+    showAuthMessage('Acceso correcto. Cargando tus datos...',false);
+  }catch(err){showAuthMessage(err.message||String(err));}
+});
+document.getElementById('btnLogout').addEventListener('click',async()=>{if(window.dimeSupabase)await window.dimeSupabase.auth.signOut()});
+
 function cget(id){return clients.find(c=>c.id===id)}
 function tname(t){return t==='new'?'Nuevo':t==='old'?'Existente':'Seguimiento'}
 function done(a){return a.completed===true}
@@ -79,5 +195,6 @@ document.getElementById('agendaDate').addEventListener('change',renderAgenda);do
 document.getElementById('search').addEventListener('input',renderClients);document.getElementById('typeFilter').addEventListener('change',renderClients);document.getElementById('historySearch').addEventListener('input',renderHistory);
 document.getElementById('btnAddClient').addEventListener('click',addClient);document.getElementById('btnExport').addEventListener('click',exportCSV);document.getElementById('btnBackup').addEventListener('click',backup);document.getElementById('btnRestore').addEventListener('click',restore);
 document.getElementById('form').addEventListener('submit',e=>{e.preventDefault();const a={id:uid(),clientId:document.getElementById('clientId').value,type:document.getElementById('type').value,date:document.getElementById('date').value,result:document.getElementById('result').value,next:document.getElementById('next').value,nextDate:document.getElementById('nextDate').value,notes:document.getElementById('notes').value.trim()};if(!a.clientId||!a.date){alert('Completa cliente y fecha.');return}if(a.next!=='Ninguna'&&!a.nextDate){alert('Si defines una próxima acción, agrega la fecha.');return}acts.push(a);const c=cget(a.clientId);if(c)c.status=a.result==='Pedido realizado'?'Cliente activo':(a.result==='Interesado'||a.result==='Solicitó cotización'?'Oportunidad':a.result==='No interesado'?'No interesado':'En seguimiento');save();e.target.reset();document.getElementById('date').value=today();renderAll();alert('Actividad guardada.')});
-document.getElementById('date').value=today();renderAll();
+document.getElementById('date').value=today();
+(async()=>{try{await startAuth()}catch(err){showAuthMessage(err.message||String(err));}})();
 </script></body></html>
