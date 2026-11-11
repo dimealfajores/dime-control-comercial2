@@ -37,7 +37,28 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
       <div class="field"><label>Contraseña</label><input id="loginPassword" type="password" autocomplete="current-password" required></div>
       <button class="primary" type="submit">Ingresar</button>
     </form>
+    <button id="btnForgotPassword" type="button" class="secondary" style="width:100%;margin-top:10px">Olvidé mi contraseña</button>
     <div id="authMessage" class="notice hidden"></div>
+  </div>
+  <div id="recoveryPanel" class="panel hidden">
+    <h2>Crear nueva contraseña</h2>
+    <p>Escribe y confirma tu nueva contraseña para tu cuenta de Dime Control Comercial.</p>
+    <form id="recoveryForm" class="formgrid" style="grid-template-columns:1fr">
+      <div class="field"><label>Nueva contraseña</label><input id="newPassword" type="password" autocomplete="new-password" minlength="8" required></div>
+      <div class="field"><label>Confirmar contraseña</label><input id="confirmPassword" type="password" autocomplete="new-password" minlength="8" required></div>
+      <button class="primary" type="submit">Guardar nueva contraseña</button>
+    </form>
+    <div id="recoveryMessage" class="notice hidden"></div>
+  </div>
+  <div id="requestRecoveryPanel" class="panel hidden">
+    <h2>Recuperar contraseña</h2>
+    <p>Te enviaremos un enlace para crear una contraseña nueva.</p>
+    <form id="requestRecoveryForm" class="formgrid" style="grid-template-columns:1fr">
+      <div class="field"><label>Correo electrónico</label><input id="recoveryEmail" type="email" autocomplete="email" required></div>
+      <button class="primary" type="submit">Enviar enlace de recuperación</button>
+      <button id="btnCancelRecovery" type="button" class="secondary">Volver a iniciar sesión</button>
+    </form>
+    <div id="requestRecoveryMessage" class="notice hidden"></div>
   </div>
 </section>
 <main class="container hidden" id="appMain">
@@ -137,16 +158,42 @@ async function enterApp(session){
   const label=profile.data.full_name||profile.data.email||cloudUser.email;
   document.getElementById('storageNotice').innerHTML='<div class="notice ok">Sesión: '+escapeHtml(label)+' · Rol: '+escapeHtml(cloudRole)+' · Datos conectados a Supabase.</div>';
 }
+let recoveryMode=false;
+function showRecoveryPanel(message){
+  recoveryMode=true;
+  document.getElementById('loginForm').classList.add('hidden');
+  document.getElementById('btnForgotPassword').classList.add('hidden');
+  document.getElementById('recoveryPanel').classList.remove('hidden');
+  document.getElementById('requestRecoveryPanel').classList.add('hidden');
+  if(message){const el=document.getElementById('recoveryMessage');el.textContent=message;el.classList.remove('hidden');}
+}
+function showLoginPanel(){
+  recoveryMode=false;
+  document.getElementById('loginForm').classList.remove('hidden');
+  document.getElementById('btnForgotPassword').classList.remove('hidden');
+  document.getElementById('recoveryPanel').classList.add('hidden');
+  document.getElementById('requestRecoveryPanel').classList.add('hidden');
+}
 async function startAuth(){
   if(!window.supabase||!window.supabase.createClient)throw new Error('No se pudo cargar la librería de Supabase. Verifica tu conexión a internet.');
   if(!window.DIME_SUPABASE_URL||!window.DIME_SUPABASE_ANON_KEY||window.DIME_SUPABASE_ANON_KEY.includes('PEGA_AQUI'))throw new Error('Falta configurar la URL y la clave anon/public en supabase-config.js.');
-  window.dimeSupabase=window.supabase.createClient(window.DIME_SUPABASE_URL,window.DIME_SUPABASE_ANON_KEY);
-  const {data,error}=await window.dimeSupabase.auth.getSession();if(error)throw error;
-  if(data.session)await enterApp(data.session);
+  if(!window.dimeSupabase)window.dimeSupabase=window.supabase.createClient(window.DIME_SUPABASE_URL,window.DIME_SUPABASE_ANON_KEY);
+  const hash=window.location.hash||'';
+  if(hash.includes('error_code=otp_expired')||hash.includes('error=access_denied')){
+    showAuthMessage('El enlace de recuperación venció o ya fue utilizado. Solicita uno nuevo con “Olvidé mi contraseña”.');
+    history.replaceState(null,document.title,window.location.pathname+window.location.search);
+  }
   window.dimeSupabase.auth.onAuthStateChange(async(event,session)=>{
-    if(event==='SIGNED_IN'&&session){try{await enterApp(session)}catch(e){showAuthMessage(e.message)}}
-    if(event==='SIGNED_OUT'){cloudReady=false;cloudUser=null;document.body.classList.remove('authenticated');document.getElementById('appMain').classList.add('hidden');document.getElementById('authPanel').classList.remove('hidden');}
+    if(event==='PASSWORD_RECOVERY')showRecoveryPanel('Enlace verificado. Ahora puedes crear tu nueva contraseña.');
+    if(event==='SIGNED_IN'&&session){
+      if(recoveryMode||((window.location.hash||'').includes('type=recovery'))){showRecoveryPanel('Enlace verificado. Ahora puedes crear tu nueva contraseña.');}
+      else{try{await enterApp(session)}catch(e){showAuthMessage(e.message)}}
+    }
+    if(event==='SIGNED_OUT'){cloudReady=false;cloudUser=null;document.body.classList.remove('authenticated');document.getElementById('appMain').classList.add('hidden');document.getElementById('authPanel').classList.remove('hidden');showLoginPanel();}
   });
+  const {data,error}=await window.dimeSupabase.auth.getSession();if(error)throw error;
+  if((window.location.hash||'').includes('type=recovery')&&data.session)showRecoveryPanel('Enlace verificado. Ahora puedes crear tu nueva contraseña.');
+  else if(data.session)await enterApp(data.session);
 }
 document.getElementById('loginForm').addEventListener('submit',async e=>{
   e.preventDefault();
@@ -157,6 +204,22 @@ document.getElementById('loginForm').addEventListener('submit',async e=>{
     if(error)throw error;
     showAuthMessage('Acceso correcto. Cargando tus datos...',false);
   }catch(err){showAuthMessage(err.message||String(err));}
+});
+document.getElementById('btnForgotPassword').addEventListener('click',()=>{
+  document.getElementById('loginForm').classList.add('hidden');document.getElementById('btnForgotPassword').classList.add('hidden');document.getElementById('requestRecoveryPanel').classList.remove('hidden');document.getElementById('recoveryEmail').value=document.getElementById('loginEmail').value.trim();
+});
+document.getElementById('btnCancelRecovery').addEventListener('click',showLoginPanel);
+document.getElementById('requestRecoveryForm').addEventListener('submit',async e=>{
+  e.preventDefault();const el=document.getElementById('requestRecoveryMessage');el.textContent='Enviando correo...';el.classList.remove('hidden');
+  try{if(!window.dimeSupabase)await startAuth();const email=document.getElementById('recoveryEmail').value.trim();const {error}=await window.dimeSupabase.auth.resetPasswordForEmail(email,{redirectTo:window.location.origin+window.location.pathname});if(error)throw error;el.textContent='Si el correo está registrado, recibirás un enlace. Abre el correo más reciente y úsalo una sola vez.';el.classList.add('ok');}
+  catch(err){el.textContent=err.message||String(err);}
+});
+document.getElementById('recoveryForm').addEventListener('submit',async e=>{
+  e.preventDefault();const p=document.getElementById('newPassword').value,c=document.getElementById('confirmPassword').value,el=document.getElementById('recoveryMessage');
+  if(p.length<8){el.textContent='La contraseña debe tener al menos 8 caracteres.';el.classList.remove('hidden');return;}
+  if(p!==c){el.textContent='Las contraseñas no coinciden.';el.classList.remove('hidden');return;}
+  try{const {data,error}=await window.dimeSupabase.auth.updateUser({password:p});if(error)throw error;el.textContent='Contraseña actualizada. Iniciando tu sesión...';el.classList.remove('hidden');el.classList.add('ok');recoveryMode=false;history.replaceState(null,document.title,window.location.pathname+window.location.search);if(data.user){const {data:sessionData}=await window.dimeSupabase.auth.getSession();if(sessionData.session)await enterApp(sessionData.session);}}
+  catch(err){el.textContent='No se pudo actualizar la contraseña: '+(err.message||String(err));el.classList.remove('hidden');}
 });
 document.getElementById('btnLogout').addEventListener('click',async()=>{if(window.dimeSupabase)await window.dimeSupabase.auth.signOut()});
 
